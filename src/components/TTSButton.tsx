@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Language } from '@/lib/types';
 
 interface TTSButtonProps {
@@ -10,80 +10,65 @@ interface TTSButtonProps {
   label?: string;
 }
 
+const speechLang: Record<Language, string> = {
+  es: 'es-ES',
+  en: 'en-US',
+  fr: 'fr-FR',
+  it: 'it-IT',
+  pt: 'pt-PT',
+  de: 'de-DE',
+  nl: 'nl-NL',
+  pl: 'pl-PL',
+  ro: 'ro-RO',
+  ar: 'ar-SA',
+  ru: 'ru-RU',
+  zh: 'zh-CN',
+};
+
 export default function TTSButton({ text, language, className = '', label }: TTSButtonProps) {
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const ctxRef = useRef<AudioContext | null>(null);
 
   const stop = useCallback(() => {
-    try { sourceRef.current?.stop(); } catch { /* already stopped */ }
-    sourceRef.current = null;
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     setIsSpeaking(false);
-    setIsLoading(false);
   }, []);
 
-  const handleClick = useCallback(async () => {
-    if (isSpeaking || isLoading) { stop(); return; }
+  useEffect(() => stop, [stop]);
 
-    setIsLoading(true);
+  const handleClick = useCallback(() => {
+    if (!('speechSynthesis' in window)) return;
 
-    // Create/resume AudioContext synchronously on the user gesture — this unlocks audio
-    // in all browsers regardless of how long the subsequent async operations take.
-    if (!ctxRef.current) {
-      ctxRef.current = new AudioContext();
-    }
-    const ctx = ctxRef.current;
-    if (ctx.state === 'suspended') await ctx.resume();
-
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language }),
-      });
-
-      if (!res.ok) throw new Error('TTS failed');
-
-      const arrayBuffer = await res.arrayBuffer();
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      source.onended = stop;
-      sourceRef.current = source;
-
-      setIsLoading(false);
-      setIsSpeaking(true);
-      source.start(0);
-    } catch {
+    if (isSpeaking) {
       stop();
+      return;
     }
-  }, [isSpeaking, isLoading, text, language, stop]);
 
-  const isActive = isSpeaking || isLoading;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = speechLang[language] ?? 'es-ES';
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    setIsSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  }, [isSpeaking, language, stop, text]);
 
   return (
     <button
       onClick={handleClick}
-      title={isActive ? 'Detener narración' : (label || 'Escuchar')}
-      aria-label={isActive ? 'Detener narración' : (label || 'Escuchar')}
+      title={isSpeaking ? 'Detener narracion' : (label || 'Escuchar')}
+      aria-label={isSpeaking ? 'Detener narracion' : (label || 'Escuchar')}
       className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-        isActive
+        isSpeaking
           ? 'bg-blue-100 text-blue-700 border border-blue-300 hover:bg-blue-200'
           : 'bg-slate-100 text-slate-600 border border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200'
       } ${className}`}
     >
-      {isLoading ? (
-        <>
-          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-          </svg>
-          {label && <span>...</span>}
-        </>
-      ) : isSpeaking ? (
+      {isSpeaking ? (
         <>
           <svg className="w-4 h-4 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
             <rect x="3" y="4" width="3" height="12" rx="1.5" />

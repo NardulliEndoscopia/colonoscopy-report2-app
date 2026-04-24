@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Anthropic from '@anthropic-ai/sdk';
 import { Language, AnalysisResult, Finding } from '@/lib/types';
 import diagnosesData from '@/data/diagnoses.json';
 
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
 
 const languageNames: Record<Language, string> = {
   es: 'Spanish',
@@ -24,6 +21,21 @@ const languageNames: Record<Language, string> = {
 
 const diagnosisKeys = Object.keys(diagnosesData);
 
+type GeminiPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } };
+
+interface GeminiResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{ text?: string }>;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -38,8 +50,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No report content provided' }, { status: 400 });
     }
 
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 });
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json({ error: 'GEMINI_API_KEY not configured' }, { status: 500 });
     }
 
     const langName = languageNames[language] || 'Spanish';
@@ -48,7 +60,7 @@ export async function POST(request: NextRequest) {
 
 For each finding:
 1. Extract the exact medical term as written in the report (always in the original language of the report)
-2. Translate that medical term into ${langName} (medical_name_translated) — use natural, correct ${langName} terminology
+2. Translate that medical term into ${langName} (medical_name_translated) - use natural, correct ${langName} terminology
 3. Identify anatomical location: one of [terminal_ileum, cecum, ascending_colon, hepatic_flexure, transverse_colon, splenic_flexure, descending_colon, sigmoid_colon, rectum, anal_canal, multiple, unspecified]
 4. Match to one of these known diagnosis types if applicable: [${diagnosisKeys.join(', ')}]
 5. Generate a patient-friendly explanation IN ${langName} with correct grammar and pronunciation for that language:
@@ -60,7 +72,7 @@ Also provide:
 - overall_summary: A brief overall summary of the colonoscopy results in ${langName} (2-3 sentences, reassuring tone)
 - report_date: Extract the date of the colonoscopy if visible in the report, otherwise null
 
-Return ONLY valid JSON (no markdown, no code blocks):
+Return ONLY valid JSON:
 {
   "findings": [
     {
@@ -84,79 +96,100 @@ If this is not a colonoscopy report or cannot be read, return:
 
 Language for all explanations: ${langName}`;
 
-    const messageContent: Anthropic.Messages.ContentBlockParam[] = [];
+    const userParts: GeminiPart[] = [];
 
     if (image) {
       const imageMatch = image.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/);
       const pdfMatch = image.match(/^data:application\/pdf;base64,(.+)$/);
 
       if (imageMatch) {
-        messageContent.push({
-          type: 'image',
-          source: {
-            type: 'base64',
-            media_type: `image/${imageMatch[1]}` as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+        userParts.push({
+          inlineData: {
+            mimeType: `image/${imageMatch[1]}`,
             data: imageMatch[2],
           },
         });
       } else if (pdfMatch) {
-        messageContent.push({
-          type: 'document',
-          source: {
-            type: 'base64',
-            media_type: 'application/pdf',
+        userParts.push({
+          inlineData: {
+            mimeType: 'application/pdf',
             data: pdfMatch[1],
           },
-        } as Anthropic.Messages.ContentBlockParam);
+        });
       } else {
         return NextResponse.json({ error: 'Invalid file format' }, { status: 400 });
       }
     }
 
     if (cleanReportText) {
-      messageContent.push({
-        type: 'text',
+      userParts.push({
         text: `Report text pasted by the user:\n\n${cleanReportText}`,
       });
     }
 
-    messageContent.push({ type: 'text', text: prompt });
+    userParts.push({ text: prompt });
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 4096,
-      messages: [
-        {
-          role: 'user',
-          content: messageContent,
-        },
-      ],
-      system: "You are a medical information assistant for Dr. Gianfranco Nardulli Fernández's colonoscopy platform (endoscopianardulli.es). Analyze colonoscopy reports and provide clear, patient-friendly explanations. Always be accurate but reassuring. Never exaggerate risks. Remind patients to consult their doctor for personalized advice.",
-    });
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [
+              {
+                text: "You are a medical information assistant for Dr. Gianfranco Nardulli Fernandez's colonoscopy platform (endoscopianardulli.es). Analyze colonoscopy reports and provide clear, patient-friendly explanations. Always be accurate but reassuring. Never exaggerate risks. Remind patients to consult their doctor for personalized advice.",
+              },
+            ],
+          },
+          contents: [
+            {
+              role: 'user',
+              parts: userParts,
+            },
+          ],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 4096,
+            responseMimeType: 'application/json',
+          },
+        }),
+      }
+    );
 
-    const content = response.content[0];
-    if (content.type !== 'text') {
-      return NextResponse.json({ error: 'Unexpected response from AI' }, { status: 500 });
+    const gemini = (await response.json()) as GeminiResponse;
+
+    if (!response.ok || gemini.error) {
+      return NextResponse.json(
+        { error: gemini.error?.message || 'Gemini service error' },
+        { status: response.status || 500 }
+      );
     }
 
-    // Clean up any markdown code blocks if present
-    let jsonText = content.text.trim();
+    let jsonText = gemini.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || '')
+      .join('')
+      .trim();
+
+    if (!jsonText) {
+      return NextResponse.json({ error: 'Unexpected response from Gemini' }, { status: 500 });
+    }
+
     jsonText = jsonText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
 
     let parsed: { error?: string; findings?: Finding[]; overall_summary?: string; report_date?: string | null };
     try {
       parsed = JSON.parse(jsonText);
     } catch {
-      // Try to extract JSON from the response
       const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch[0]);
         } catch {
-          return NextResponse.json({ error: 'Failed to parse AI response' }, { status: 500 });
+          return NextResponse.json({ error: 'Failed to parse Gemini response' }, { status: 500 });
         }
       } else {
-        return NextResponse.json({ error: 'Failed to parse AI response' }, { status: 500 });
+        return NextResponse.json({ error: 'Failed to parse Gemini response' }, { status: 500 });
       }
     }
 
@@ -168,7 +201,6 @@ Language for all explanations: ${langName}`;
       return NextResponse.json({ error: 'Invalid response structure' }, { status: 500 });
     }
 
-    // Add sequential IDs to each finding
     const findingsWithIds: Finding[] = parsed.findings.map((finding, index) => ({
       ...finding,
       id: `finding-${index + 1}`,
@@ -181,18 +213,8 @@ Language for all explanations: ${langName}`;
     };
 
     return NextResponse.json(result, { status: 200 });
-
   } catch (error) {
     console.error('Analysis error:', error);
-    if (error instanceof Anthropic.APIError) {
-      return NextResponse.json(
-        { error: `AI service error: ${error.message}` },
-        { status: error.status || 500 }
-      );
-    }
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
