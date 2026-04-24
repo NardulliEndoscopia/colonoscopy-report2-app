@@ -27,8 +27,5 @@ npm run start
 
 ## Variables de entorno
 
-GEMINI_API_KEY=tu_clave_de_google_ai_studio
-ADMIN_PASSWORD=tu_contrasena_segura
-NEXT_PUBLIC_DOCTOR_CONFIG={}
-
-No subas .env.local al repositorio.
+GEMINI_API_KEY=AIzaSyCOlo_kltV7bLO86PtaQ5ESah2khzcRPOw
+ADMIN_PASSWORD=2026Tiburonescampeones$
