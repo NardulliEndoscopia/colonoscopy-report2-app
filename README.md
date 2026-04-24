@@ -28,4 +28,4 @@ npm run start
 ## Variables de entorno
 
 GEMINI_API_KEY=AIzaSyCOlo_kltV7bLO86PtaQ5ESah2khzcRPOw
-ADMIN_PASSWORD=2026Tiburonescampeones$
+ADMIN_PASSWORD=Tiburonescampeones2026
